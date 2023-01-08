@@ -9,7 +9,10 @@
 */
 var CombatMaster = CombatMaster || (function() {
     'use strict';
-
+    const templateTypes = new Set(['dmg', 'spell', 'atkdmg']);
+    const exceptionTemplates = new Set(['dmg', 'atkdmg']);
+    const spellTexts = ["{{spelllevel=", "{{level="];
+    const debounceMilliseconds = 750;
     let round = 1,
 	    version = '2.48',
         timerObj,
@@ -105,22 +108,22 @@ var CombatMaster = CombatMaster || (function() {
     combatState = 'COMBATMASTER',
 
     inputHandler = function(msg_orig) {
+        if (debug) {
+            // log(`msg_orig: ${JSON.stringify(msg_orig, null,2 )}`);
+        }
 
         let status = state[combatState].config.status
         if (status.autoAddSpells) {
             if (status.sheet == 'OGL') {
-                if (msg_orig && (msg_orig.rolltemplate && msg_orig.rolltemplate === 'spell') ) {
-                    if (debug) {
-                        log(msg_orig)
-                    }    
+                if (templateTypes.has(msg_orig.rolltemplate) && spellTexts.some(e => msg_orig.content.includes(e))) {   
                     handleSpellCast(msg_orig)
-                }
+                } 
             } else if (status.sheet == 'Shaped')  {
-                if (msg_orig && msg_orig.content.includes("{{spell=1}}")) {
+                if (msg_orig.content.includes("{{spell=1}}")) {
                     handleSpellCast(msg_orig)
                 }              
             }  else if (status.sheet == 'PF2')  {
-                if (msg_orig && msg_orig.content.includes("{cast}")) {
+                if (msg_orig.content.includes("{cast}")) {
                     handleSpellCast(msg_orig)
                 }              
             } 
@@ -804,7 +807,7 @@ var CombatMaster = CombatMaster || (function() {
 		
 		if (concentration.autoRoll) {
 		    listItems.push(makeTextButton('Wound Bar', concentration.woundBar, '!cmaster --config,concentration,key=woundBar,value=?{Wound Bar|Bar1,bar1|Bar2,bar2|Bar3,bar3} --show,concentration'))  
-		    listItems.push(makeTextButton('Attribute', concentration.attribute, '!cmaster --config,concentration,key=attribute,value=?{Attribute|} --show,concentration'))  
+		    listItems.push(makeTextButton('Attribute', concentration.attribute, '!cmaster --config,concentration,key=attribute,value=?{Attribute|constitution_save_bonus} --show,concentration'))  
 		    
 		}
 
@@ -1315,7 +1318,7 @@ var CombatMaster = CombatMaster || (function() {
             
             setTimeout(function() {
                  state[combatState].conditions.push(newCondition)
-            },500) 
+            },debounceMilliseconds) 
 
             addMarker(tokenObj, newCondition.iconType, newCondition.icon, newCondition.duration, newCondition.direction, newCondition.key)
 
@@ -1753,7 +1756,7 @@ var CombatMaster = CombatMaster || (function() {
     
             statusMarkers.push(statusMarker)
             tokenObj.set('statusmarkers', statusMarkers.join())
-        }, 500);
+        }, debounceMilliseconds);
     },
 
     removeMarker = function(tokenObj, markerType, marker) {
@@ -1897,12 +1900,12 @@ var CombatMaster = CombatMaster || (function() {
                     if (state[combatState].config.turnorder.useMarker) {
                         marker.set({ layer: 'objects' });
                     }    
-                }, 500);
+                }, debounceMilliseconds);
             } else { 
                 marker.set({ layer: 'gmlayer' });
                 setTimeout(() => {
                     marker.set(position);
-                }, 500);
+                }, debounceMilliseconds);
             }
         } else {
             marker.set(position);
@@ -2815,8 +2818,8 @@ var CombatMaster = CombatMaster || (function() {
 //*************************************************************************************************************	  
     handleSpellCast = function(msg) {
         if (debug) {
-            log('Handle Spell Cast')
-            log(msg)
+            log('Handle Spell Cast');
+            log(msg);
         }
         
         let status          = state[combatState].config.status;
@@ -2834,14 +2837,35 @@ var CombatMaster = CombatMaster || (function() {
             spellName    = RegExp.$1;     
             description  = msg.content.match(/description=([^\n{}]*[^"\n{}])/)  
             description  = RegExp.$1;  
-            spellLevel   = msg.content.match(/spelllevel=([^\n{}]*[^"\n{}])/)  
-            spellLevel   = RegExp.$1;  
-            durationmult = 1
+            spellLevel   = msg.content.match(/level=\D*(\d)/);  
+            spellLevel   = RegExp.$1;
+            const durationFound = msg.content.match(/duration=\D+(\d+)\s(round|minute|hour)s{0,1}}}/i);
+            
+            if (durationFound) {
+                duration = durationFound[1];
+                const unit = durationFound[2];
+                if (debug) {
+                    log(`unit: ${unit}`);
+                }
+                switch(unit) {
+                    case "round":
+                        break;
+                    case "minute":
+                        duration *= 10;
+                        break;
+                    case "hour":
+                        duration *= 60;
+                        break;
+                    default:
+                        break;
+                }
+                direction = duration <= 10 ? -1 : 0;
+            }
+            
             if (msg.content.includes("{{concentration=1}}")) {
                 concentrate = true
-            } 
-
-            if (!spellLevel && !concentrate) {
+            }
+            if (!spellLevel && (!concentrate && msg.rolltemplate === 'spell')) {
                 return;
             }            
         } else if (status.sheet == 'Shaped') {
@@ -2864,7 +2888,8 @@ var CombatMaster = CombatMaster || (function() {
                 duration = 1
             } else {
                 duration = (duration * durationmult);
-            }    
+            }
+            
             if (msg.content.includes("CONCENTRATION")) {
                 concentrate = true
             }             
@@ -2897,27 +2922,23 @@ var CombatMaster = CombatMaster || (function() {
             direction = 0
         }        
         if (status.autoAddSpells) {     
-            let key = spellName.toLowerCase()
+            let key = spellKeyRoot(spellName).toLowerCase()
             let condition = getConditionByKey(key)
-            if (duration >= 1) {
-                direction = -1
-            }
-            else {
-                direction = 0
-            }            
+            
             if (typeof condition == 'undefined' && !getIgnoresByKey(key)) {
                 state[combatState].spells[key] = {
-                				name: spellName,
+                				name: key,
                 				key: key,
                 				type: 'Spell',
                 				icon: 'red',
                 				iconType: 'Combat Master',
                 				description: description,
-                				duration: duration,
+                				duration: duration <= 10 ? duration : 1,
                 				direction: direction,
                 				message: 'None',
                 				targeted: false,
                 				favorite: false,
+                				override: false,
                 				concentration: concentrate,
                 				description: description,
                 				addAPI: 'None',
@@ -2936,9 +2957,8 @@ var CombatMaster = CombatMaster || (function() {
                 makeAndSendMenu(`A new spell - ${spellName} - was detected<br>`+addSpellButton+ignoreSpellButton ,`New Spell Found`,`gm`)
                 
             }  else if (condition) {
-                targetedSpell(key)
-                if (concentration.useConcentration && concentrate == true && condition.override == false) {     
-                    let characterName
+                if (concentration.useConcentration && (concentrate === true || exceptionTemplates.has(msg.rolltemplate)) && condition.override == false) {     
+                    let characterName;
                     if (status.sheet == 'OGL') {
                         characterName = msg.content.match(/charname=([^\n{}]*[^"\n{}])/);
                         characterName = RegExp.$1;
@@ -2947,19 +2967,28 @@ var CombatMaster = CombatMaster || (function() {
                         characterName = msg.content.match(/{{character_name=([\w\d ]+[^"\n{}]?)/);
                         characterName = RegExp.$1;
                     }
-                    let characterID     = findObjs({ name: characterName, _type: 'character' }).shift().get('id')    
-                    let tokenObj        = findObjs({ represents: characterID, _pageid:Campaign().get("playerpageid"), _type: 'graphic' })[0]
+                    let characterID     = findObjs({ name: characterName, _type: 'character' }).shift().get('id');
+                    let tokenObj        = findObjs({ represents: characterID, type: 'graphic' })[0];
                     addConditionToToken(tokenObj,'concentration',condition.duration,condition.direction,'Concentrating on ' +spellName)
                 }                   
             }
         }
     },
     
+    spellKeyRoot = function(key) {
+        const found = key.match(/^([\w|\s|'|-]+\w)\s*\(*.*$/);
+        if (found) {
+            const keyRoot = found[1];
+            if (debug) {
+                log(`keyRoot: ${keyRoot}`);
+            }
+            return keyRoot;
+        }
+        return key;
+    },
+    
     addSpell = function(key) {
-        if (debug) {
-            log('Add Spell')
-            log(key)
-        }        
+        key = spellKeyRoot(key);
         state[combatState].config.conditions[key] = state[combatState].spells[key] 
         let index = state[combatState].spells.indexOf(key);
         if (index > -1) {
@@ -2973,18 +3002,18 @@ var CombatMaster = CombatMaster || (function() {
             log('Ignore Spell')
             log(key)
         }  
-        
+       key = spellKeyRoot(key);
        state[combatState].ignores.push(key)
        makeAndSendMenu('Spell has been added to Ignore List','Spell Ignored','gm');
     },
     
     getIgnoresByKey = function(key) {
+        key = spellKeyRoot(key);
         if (debug) {
             log('Get Ignores By Key')
             log('Key:'+key)
             log('Exists:'+state[combatState].ignores.includes(key))
-        }  
-        
+        }
         if (state[combatState].ignores.includes(key)) {
             return true
         } else {
@@ -2993,7 +3022,38 @@ var CombatMaster = CombatMaster || (function() {
     },
 //*************************************************************************************************************
 //SPELLS 
-//*************************************************************************************************************	  
+//*************************************************************************************************************
+    hasAdvantage = function(tokenObj) {
+        const characterObj = getObj('character', tokenObj.get('represents'));
+        
+        // case race is goliath
+        const race = getAttrByName(characterObj.id, 'race');
+        if (debug) {
+            log(`race: ${race}`);
+        }
+        const isGoliath = race === 'Goliath';
+        if (isGoliath) {
+            return true;
+        }
+        
+        // case has war caster or eldritch mind
+        const charAttrs = findObjs({
+            type: 'attribute',
+            characterid: characterObj.id,
+        });
+        
+        const hasWarcasterOrEldritchMind = charAttrs.some(charAttr => {
+            const current = charAttr.get("current");
+            const name = charAttr.get("name");
+            if (!name.startsWith("repeating_traits_")) {
+                return false;
+            }
+            return (typeof current === 'string') && current.match(/(?:war\s*caster|eldritch\s*mind)/i);
+        });
+        return hasWarcasterOrEldritchMind;
+        
+    },
+    
     handleConstitutionSave = function(obj, prev) {
         if (debug) {
             log('Handle Constitution Save')
@@ -3033,74 +3093,68 @@ var CombatMaster = CombatMaster || (function() {
                 contents = '<b>'+obj.get('name')+'</b> must make a Concentration Check - <b>DC ' + DC + '</b>.';
                 target = 'gm';
             }
-            makeAndSendMenu(contents, '', target);
-            // if(concentration.autoRoll){
-            //     roll(obj.get('represents'), DC, conSave, obj.get('name'), target);
-            // }else{
-                // makeAndSendMenu(contents, '', target);
-            // }
-
-            // let length = checked.push(obj.get('represents'));
-            // setTimeout(() => {
-            //     checked.splice(length-1, 1);
-            // }, 1000);
+            if (concentration.autoRoll) {
+                const withAdvantage = hasAdvantage(obj);
+                roll(obj, DC, conSave, obj.get('name'), '', withAdvantage);
+            }
         }
     },
 
-    // roll = (represents, DC, conSave, name, target) => {
-    //     sendChat(script_name, '[[1d20cf<'+(DC-con_save_mod-1)+'cs>'+(DC-con_save_mod-1)+'+'+con_save_mod+']]', results => {
-    //         let title = 'Concentration Save <br> <b style="font-size: 10pt; color: gray;">'+name+'</b>',
-    //             advantageRollResult;
+    roll = (tokenObj, DC, con_save_mod, name, target, advantage) => {
+        sendChat(script_name, '[[1d20cf<'+(DC-con_save_mod-1)+'cs>'+(DC-con_save_mod-1)+'+'+con_save_mod+']]', results => {
+            let title = 'Concentration Save <br> <b style="font-size: 10pt; color: gray;">'+name+'</b>',
+                advantageRollResult;
 
-    //         let rollresult = results[0].inlinerolls[0].results.rolls[0].results[0].v;
-    //         let result = rollresult;
+            let rollresult = results[0].inlinerolls[0].results.rolls[0].results[0].v;
+            let result = rollresult;
 
-    //         if(advantage){
-    //             advantageRollResult = randomInteger(20);
-    //             result = (rollresult <= advantageRollResult) ? advantageRollResult : rollresult;
-    //         }
+            if(advantage){
+                advantageRollResult = randomInteger(20);
+                result = (rollresult <= advantageRollResult) ? advantageRollResult : rollresult;
+            }
 
-    //         let total = result + con_save_mod;
+            let total = result + con_save_mod;
 
-    //         let success = total >= DC;
+            let success = total >= DC;
 
-    //         let result_text = (success) ? 'Success' : 'Failed',
-    //             result_color = (success) ? 'green' : 'red';
+            let result_text = (success) ? 'Success' : 'Failed',
+                result_color = (success) ? 'green' : 'red';
 
-    //         let rollResultString = (advantage) ? rollresult + ' / ' + advantageRollResult : rollresult;
+            let rollResultString = (advantage) ? rollresult + ' / ' + advantageRollResult : rollresult;
 
-    //         let contents = ' \
-    //         <table style="width: 100%; text-align: left;"> \
-    //             <tr> \
-    //                 <th>DC</th> \
-    //                 <td>'+DC+'</td> \
-    //             </tr> \
-    //             <tr> \
-    //                 <th>Modifier</th> \
-    //                 <td>'+con_save_mod+'</td> \
-    //             </tr> \
-    //             <tr> \
-    //                 <th>Roll Result</th> \
-    //                 <td>'+rollResultString+'</td> \
-    //             </tr> \
-    //         </table> \
-    //         <div style="text-align: center"> \
-    //             <b style="font-size: 16pt;"> \
-    //                 <span style="border: 1px solid '+result_color+'; padding-bottom: 2px; padding-top: 4px;">[['+result+'+'+con_save_mod+']]</span><br><br> \
-    //                 '+result_text+' \
-    //             </b> \
-    //         </div>'
-    //         makeAndSendMenu(contents, title, target);
+            let contents = ' \
+            <table style="width: 100%; text-align: left;"> \
+                <tr> \
+                    <th>DC</th> \
+                    <td>'+DC+'</td> \
+                </tr> \
+                <tr> \
+                    <th>Modifier</th> \
+                    <td>'+con_save_mod+'</td> \
+                </tr> \
+                <tr> \
+                    <th>Roll Result</th> \
+                    <td>'+rollResultString+'</td> \
+                </tr> \
+            </table> \
+            <div style="text-align: center"> \
+                <b style="font-size: 16pt;"> \
+                    <span style="border: 1px solid '+result_color+'; padding-bottom: 2px; padding-top: 4px;">[['+result+'+'+con_save_mod+']]</span><br><br> \
+                    '+result_text+' \
+                </b> \
+            </div>'
+            makeAndSendMenu(contents, title, target);
 
-    //         if(target !== '' && target !== 'gm'){
-    //             makeAndSendMenu(contents, title, 'gm');
-    //         }
+            if(target !== '' && target !== 'gm'){
+                makeAndSendMenu(contents, title, 'gm');
+            }
 
-    //         if(!success){
-    //             removeMarker(represents);
-    //         }
-    //     });
-    // },    
+            if(!success){
+                removeConditionFromToken(tokenObj, 'concentration', false);
+            }
+        });
+    },
+    
     
     inFight = function () {
         return (Campaign().get('initiativepage') !== false);
@@ -3337,8 +3391,8 @@ var CombatMaster = CombatMaster || (function() {
 					notify: 'GM',
 					autoAdd: false,
 					autoRoll: false,
-					woundBar: 'Bar1',
-					attribute: 'None'
+					woundBar: 'bar1',
+					attribute: 'consitution_save_bonus'
 				},					
 			    conditions: {
 					blinded: {
@@ -4551,7 +4605,8 @@ var CombatMaster = CombatMaster || (function() {
         on('change:graphic:top', handleGraphicMovement);
         on('change:graphic:left', handleGraphicMovement);
         on('change:graphic:layer', handleGraphicMovement);
-        on('change:graphic:'+state[combatState].config.concentration.woundBar+'_value', handleConstitutionSave);
+        const bar = 'bar1_value';
+        on('change:graphic:'+bar, handleConstitutionSave);
 
         if('undefined' !== typeof DeathTracker && DeathTracker.ObserveTokenChange){
             DeathTracker.ObserveTokenChange(function(obj,prev) {
